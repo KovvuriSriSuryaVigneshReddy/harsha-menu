@@ -1,0 +1,8 @@
+                
+                <div className="mb-6 bg-slate-50 border border-slate-200 rounded-xl p-4 flex items-center gap-3">
+                  <label className="font-black text-sm text-slate-700 uppercase">Select Date:</label>
+                  <input type="date" value={selectedAnalyticsDate.split('/').reverse().join('-')} onChange={(e) => { const parts = e.target.value.split('-'); setSelectedAnalyticsDate(`${parts[2]}/${parts[1]}/${parts[0]}`); }} className="flex-1 bg-white border border-slate-300 rounded-lg px-4 py-2 font-semibold" />
+                </div>
+
+                {completedOrders.filter(order => order.date === selectedAnalyticsDate).length === 0 ? (
+                  <div className="bg-slate-50 rounded-xl border-2 border-dashed border-slate-200 p-12 text-center"><p className="text-slate-500 text-sm">No completed orders for {selectedAnalyticsDate}.</p></div>

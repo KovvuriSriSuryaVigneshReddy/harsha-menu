@@ -1,0 +1,998 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { db } from './firebase';
+import * as XLSX from 'xlsx';
+import { 
+  collection, 
+  doc, 
+  onSnapshot, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  setDoc,
+  getDoc
+} from 'firebase/firestore';
+import { 
+  Utensils, 
+  ShoppingBag, 
+  Plus, 
+  Minus,
+  Trash2, 
+  CheckCircle, 
+  RefreshCw,
+  Eye,
+  EyeOff,
+  ClipboardList,
+  Layers,
+  Sparkles,
+  Lock,
+  Unlock,
+  Printer,
+  Filter,
+  Edit2,
+  X,
+  Check,
+  Download
+} from 'lucide-react';
+
+import { MASTER_MENU_DATASET } from './menuData';
+
+const MENU_CATEGORIES = [
+  'VEG SOUPS',
+  'VEG STARTERS',
+  'VEG BRIYANI',
+  'VEG RICE & NOODELS',
+  'VEG CURRIES',
+  'NON VEG SOUPS',
+  'NON VEG RICE & NOODELS',
+  'NON VEG STARTERS',
+  'NON VEG BRIYANI',
+  'NON VEG CURRIES',
+  'NAANS & ROTI',
+  'TANDURI & KABA\'S',
+  'ONLY TABLE PURPOSE',
+  'DRINKS'
+];
+
+export default function RestaurantApp() {
+  const [currentView, setCurrentView] = useState('customer'); 
+  const [kitchenSubView, setKitchenSubView] = useState('orders'); 
+  const [activeCategory, setActiveCategory] = useState('VEG SOUPS'); 
+  const [activeInventoryCategory, setActiveInventoryCategory] = useState('VEG SOUPS'); 
+  const [cart, setCart] = useState([]);
+  const [isCartOpen, setIsCartOpen] = useState(false);
+  const [tableNumber, setTableNumber] = useState('');
+  const [parcelSearch, setParcelSearch] = useState('');
+  
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [isStaffAuthenticated, setIsStaffAuthenticated] = useState(false);
+  const pinInputRef = useRef(null);
+  const OWNER_PIN = '3579'; 
+
+  const [toast, setToast] = useState({ show: false, message: '' });
+  const [activePrintOrder, setActivePrintOrder] = useState(null);
+
+  const [menuItems, setMenuItems] = useState(MASTER_MENU_DATASET);
+  const [orders, setOrders] = useState([]);
+  const [completedOrders, setCompletedOrders] = useState([]);
+  const [completedBillsCount, setCompletedBillsCount] = useState(0);
+  const [selectedAnalyticsDate, setSelectedAnalyticsDate] = useState(new Date().toLocaleDateString('en-GB'));
+
+  const [isAddFormOpen, setIsAddFormOpen] = useState(false);
+  const [newItemName, setNewItemName] = useState('');
+  const [newItemPrice, setNewItemPrice] = useState('');
+  const [newItemCategory, setNewItemCategory] = useState('VEG SOUPS');
+  const [newItemDescription, setNewItemDescription] = useState('');
+  const [newItemSerial, setNewItemSerial] = useState('');
+
+  // States to track editing inline fields
+  const [editingItemId, setEditingItemId] = useState(null);
+  const [editName, setEditEditName] = useState('');
+  const [editPrice, setEditPrice] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [editSerial, setEditSerial] = useState('');
+
+  const showToast = (message) => {
+    setToast({ show: true, message });
+    setTimeout(() => setToast({ show: false, message: '' }), 4000);
+  };
+
+  // Daily reset at 12am (midnight)
+  const checkAndResetAtMidnight = async () => {
+    try {
+      const configRef = doc(db, "system_config", "counters");
+      const configSnap = await getDoc(configRef);
+      if (!configSnap.exists()) return;
+
+      const data = configSnap.data();
+      const lastResetTime = data.lastResetTimestamp || 0;
+      const now = Date.now();
+      const lastResetDate = data.lastResetDate || '';
+      const todayDate = new Date().toLocaleDateString('en-GB');
+
+      // Reset if it's a new calendar day
+      if (lastResetDate !== todayDate) {
+        await setDoc(configRef, {
+          billNo: 1,
+          tokenNo: 1,
+          completedBillsCount: 0,
+          lastResetDate: todayDate,
+          lastResetTimestamp: now
+        });
+      }
+    } catch (err) {
+      console.error('Midnight reset check error:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (isAuthModalOpen) {
+      const timeoutId = window.setTimeout(() => {
+        if (pinInputRef.current) {
+          pinInputRef.current.focus();
+          pinInputRef.current.select();
+        }
+      }, 50);
+      return () => window.clearTimeout(timeoutId);
+    }
+    return undefined;
+  }, [isAuthModalOpen]);
+
+  // Check for daily reset at midnight every minute
+  useEffect(() => {
+    checkAndResetAtMidnight(); // Check on app load
+    const interval = setInterval(checkAndResetAtMidnight, 60000); // Check every 60 seconds
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleForceMasterSeed = async () => {
+    try {
+      showToast("⏳ Syncing entire menu catalog to Firestore...");
+      for (const item of MASTER_MENU_DATASET) {
+        await setDoc(doc(db, "menu_items", item.id), { ...item, isAvailable: true });
+      }
+      showToast("✅ All categories fully synced online!");
+    } catch (err) {
+      alert("Sync Error: " + err.message);
+    }
+  };
+
+  useEffect(() => {
+    if (!db) return;
+
+    const unsubscribeMenu = onSnapshot(collection(db, "menu_items"), (snapshot) => {
+      if (!snapshot.empty) {
+        const items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setMenuItems(items);
+      } else {
+        MASTER_MENU_DATASET.forEach((item) => {
+          setDoc(doc(db, "menu_items", item.id), { ...item, isAvailable: true });
+        });
+        setMenuItems(MASTER_MENU_DATASET);
+      }
+    });
+
+    const unsubscribeOrders = onSnapshot(collection(db, "orders"), (snapshot) => {
+      const liveOrders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setOrders(liveOrders);
+    });
+
+    const unsubscribeCompletedOrders = onSnapshot(collection(db, "completed_orders"), (snapshot) => {
+      const completed = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setCompletedOrders(completed);
+    });
+
+    const unsubscribeCounters = onSnapshot(doc(db, "system_config", "counters"), (snapshot) => {
+      if (snapshot.exists()) {
+        setCompletedBillsCount(snapshot.data().completedBillsCount || 0);
+      } else {
+        setDoc(doc(db, "system_config", "counters"), { billNo: 1, tokenNo: 1, completedBillsCount: 0, lastOrderDate: "" });
+      }
+    });
+
+    return () => {
+      unsubscribeMenu();
+      unsubscribeOrders();
+      unsubscribeCompletedOrders();
+      unsubscribeCounters();
+    };
+  }, []);
+
+  const toggleItemAvailability = async (itemId) => {
+    const itemRef = doc(db, "menu_items", itemId);
+    const targetItem = menuItems.find(i => i.id === itemId);
+    if (targetItem) {
+      await updateDoc(itemRef, { isAvailable: !targetItem.isAvailable });
+      showToast(`Updated ${targetItem.name} status.`);
+    }
+  };
+
+  const startEditingItem = (item) => {
+    setEditingItemId(item.id);
+    setEditEditName(item.name);
+    setEditPrice(item.price);
+    setEditDescription(item.description || '');
+    setEditSerial(item.serial || '');
+  };
+
+  const handleUpdateItem = async (itemId) => {
+    if (!editName.trim() || !editPrice) return;
+    try {
+      const itemRef = doc(db, "menu_items", itemId);
+      await updateDoc(itemRef, {
+        name: editName.toUpperCase(),
+        price: Number(editPrice),
+        description: editDescription,
+        serial: editSerial.trim()
+      });
+      setEditingItemId(null);
+      showToast("📝 Item updated successfully!");
+    } catch (err) {
+      alert("Update error: " + err.message);
+    }
+  };
+
+  const handleAddItem = async (e) => {
+    e.preventDefault();
+    if (!newItemName.trim() || !newItemPrice) return;
+
+    const newId = `custom-${Date.now()}`;
+    await setDoc(doc(db, "menu_items", newId), {
+      id: newId,
+      name: newItemName.toUpperCase(),
+      price: Number(newItemPrice),
+      category: newItemCategory,
+      description: newItemDescription || 'Freshly prepared specialty.',
+      serial: newItemSerial.trim(),
+      isAvailable: true
+    });
+
+    showToast(`🎁 Added ${newItemName.toUpperCase()}!`);
+    setNewItemName(''); setNewItemPrice(''); setNewItemDescription(''); setNewItemSerial('');
+    setIsAddFormOpen(false);
+  };
+
+  const handleRemoveItem = async (itemId, itemName) => {
+    if (window.confirm(`Permanently delete "${itemName}"?`)) {
+      await deleteDoc(doc(db, "menu_items", itemId));
+      showToast(`🗑️ Removed ${itemName}`);
+    }
+  };
+
+  const handlePlaceOrder = async (e) => {
+    e.preventDefault();
+    const isParcelOrder = currentView === 'parcel';
+    if (!isParcelOrder && !tableNumber.trim()) return alert('Please enter your Table Number.');
+    if (cart.length === 0) return;
+
+    const now = new Date();
+    const formattedDate = now.toLocaleDateString('en-GB'); 
+    const formattedTime = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+
+    const configRef = doc(db, "system_config", "counters");
+    const configSnap = await getDoc(configRef);
+    let { billNo, tokenNo, lastResetDate, completedBillsCount: totalDone } = configSnap.data() || { billNo: 1, tokenNo: 1, completedBillsCount: 0, lastResetDate: "" };
+
+    // Reset counters if it's a new calendar day (past midnight)
+    if (lastResetDate !== "" && lastResetDate !== formattedDate) {
+      billNo = 1;
+      tokenNo = 1;
+      totalDone = 0;
+    }
+
+    const assignedBill = billNo;
+    const assignedToken = tokenNo;
+
+    await addDoc(collection(db, "orders"), {
+      billNo: assignedBill.toString(),
+      tokenNo: assignedToken.toString(),
+      tableNumber: isParcelOrder ? 'PARCEL' : tableNumber,
+      isParcel: isParcelOrder,
+      date: formattedDate,
+      time: formattedTime,
+      items: cart.map(item => ({ name: item.name, quantity: item.quantity, price: item.price }))
+    });
+
+    await setDoc(configRef, {
+      billNo: assignedBill + 1,
+      tokenNo: assignedToken + 1,
+      completedBillsCount: totalDone,
+      lastResetDate: formattedDate,
+      lastResetTimestamp: Date.now()
+    });
+
+    setCart([]); setTableNumber(''); setIsCartOpen(false);
+    showToast(isParcelOrder ? '🎉 Parcel order sent!' : `🎉 Order sent! Table ${tableNumber}`);
+  };
+
+  const getItemSerial = (item) => {
+    if (item.serial && `${item.serial}`.trim() !== '') {
+      return `${item.serial}`.trim();
+    }
+    const masterIndex = MASTER_MENU_DATASET.findIndex((masterItem) => masterItem.id === item.id);
+    if (masterIndex >= 0) {
+      return `${masterIndex + 1}`;
+    }
+    const fallbackIndex = menuItems.findIndex((menuItem) => menuItem.id === item.id);
+    return fallbackIndex >= 0 ? `${fallbackIndex + 1}` : '';
+  };
+
+  const filteredMenuItems = (() => {
+    const searchValue = parcelSearch.trim().toLowerCase();
+    if (currentView === 'parcel') {
+      return menuItems.filter((item) => {
+        if (!item.isAvailable) return false;
+        if (searchValue === '') return item.category === activeCategory;
+        const serialLabel = getItemSerial(item);
+        const combined = `${serialLabel} ${item.name} ${item.category} ${item.description || ''}`.toLowerCase();
+        return combined.includes(searchValue);
+      });
+    }
+    return menuItems.filter(item => item.category === activeCategory && item.isAvailable);
+  })();
+
+  const markOrderDone = async (orderId) => {
+    try {
+      const orderRef = doc(db, "orders", orderId);
+      const orderSnap = await getDoc(orderRef);
+      
+      if (orderSnap.exists()) {
+        // Save to completed_orders collection
+        await addDoc(collection(db, "completed_orders"), {
+          ...orderSnap.data(),
+          completedAt: new Date().toISOString()
+        });
+      }
+      
+      // Delete from active orders
+      await deleteDoc(orderRef);
+      
+      const configRef = doc(db, "system_config", "counters");
+      const configSnap = await getDoc(configRef);
+      const currentTally = configSnap.data()?.completedBillsCount || 0;
+
+      await updateDoc(configRef, { completedBillsCount: currentTally + 1 });
+      showToast('Order completed.');
+    } catch (err) {
+      alert('Error marking order as done: ' + err.message);
+    }
+  };
+
+  const handleResetCounters = async () => {
+    if (window.confirm("Reset Completed Bills count to 0?")) {
+      await setDoc(doc(db, "system_config", "counters"), {
+        billNo: 1,
+        tokenNo: 1,
+        completedBillsCount: 0,
+        lastOrderDate: new Date().toLocaleDateString('en-GB')
+      });
+      showToast("🔄 Daily tallies reset!");
+    }
+  };
+
+  const handleExportSalesReport = () => {
+    const filteredOrders = completedOrders.filter(order => order.date === selectedAnalyticsDate);
+    if (filteredOrders.length === 0) {
+      alert('No completed orders for this date.');
+      return;
+    }
+
+    const itemStats = {};
+    
+    menuItems.forEach((item) => {
+      itemStats[item.name] = {
+        itemName: item.name,
+        category: item.category,
+        price: item.price,
+        totalQty: 0,
+        totalRevenue: 0
+      };
+    });
+
+    filteredOrders.forEach((order) => {
+      order.items?.forEach((orderItem) => {
+        if (itemStats[orderItem.name]) {
+          itemStats[orderItem.name].totalQty += orderItem.quantity;
+          itemStats[orderItem.name].totalRevenue += orderItem.quantity * orderItem.price;
+        }
+      });
+    });
+
+    const reportData = Object.values(itemStats)
+      .filter(item => item.totalQty > 0)
+      .sort((a, b) => b.totalQty - a.totalQty);
+
+    if (reportData.length === 0) {
+      alert('No items sold on this date.');
+      return;
+    }
+
+    // Create worksheet
+    const wsData = [
+      ['HARSHA RESTAURANT - SALES REPORT'],
+      ['Generated on: ' + new Date().toLocaleString('en-GB')],
+      [],
+      ['Item Name', 'Category', 'Price (₹)', 'Total Qty Sold', 'Total Revenue (₹)']
+    ];
+
+    reportData.forEach((item) => {
+      wsData.push([
+        item.itemName,
+        item.category,
+        item.price.toFixed(2),
+        item.totalQty,
+        item.totalRevenue.toFixed(2)
+      ]);
+    });
+
+    // Add summary row
+    wsData.push([]);
+    const totalQty = reportData.reduce((sum, item) => sum + item.totalQty, 0);
+    const totalRevenue = reportData.reduce((sum, item) => sum + item.totalRevenue, 0);
+    wsData.push(['TOTAL', '', '', totalQty, totalRevenue.toFixed(2)]);
+
+    // Create workbook
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    
+    // Set column widths
+    ws['!cols'] = [
+      { wch: 25 },
+      { wch: 15 },
+      { wch: 12 },
+      { wch: 15 },
+      { wch: 18 }
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Sales Report');
+
+    // Generate filename with current date
+    const dateStr = new Date().toLocaleDateString('en-GB').replace(/\//g, '-');
+    XLSX.writeFile(wb, `harsha_sales_report_${dateStr}.xlsx`);
+
+    showToast('📊 Sales report exported successfully!');
+  };
+
+  const getAnalyticsData = () => {
+    const itemStats = {};
+    
+    menuItems.forEach((item) => {
+      itemStats[item.name] = {
+        itemName: item.name,
+        category: item.category,
+        price: item.price,
+        totalQty: 0,
+        totalRevenue: 0
+      };
+    });
+
+    const filteredOrders = completedOrders.filter(order => order.date === selectedAnalyticsDate);
+
+    filteredOrders.forEach((order) => {
+      order.items?.forEach((orderItem) => {
+        if (itemStats[orderItem.name]) {
+          itemStats[orderItem.name].totalQty += orderItem.quantity;
+          itemStats[orderItem.name].totalRevenue += orderItem.quantity * orderItem.price;
+        }
+      });
+    });
+
+    return Object.values(itemStats)
+      .filter(item => item.totalQty > 0)
+      .sort((a, b) => b.totalQty - a.totalQty);
+  };
+
+  const addToCart = (item) => {
+    setCart((prevCart) => {
+      const existing = prevCart.find((cartItem) => cartItem.id === item.id);
+      if (existing) {
+        return prevCart.map((cartItem) =>
+          cartItem.id === item.id ? { ...cartItem, quantity: cartItem.quantity + 1 } : cartItem
+        );
+      }
+      return [...prevCart, { ...item, quantity: 1 }];
+    });
+    showToast(`Added ${item.name}`);
+  };
+
+  const updateQuantity = (id, change) => {
+    setCart((prevCart) =>
+      prevCart
+        .map((item) => {
+          if (item.id === id) {
+            const nextQty = item.quantity + change;
+            return nextQty > 0 ? { ...item, quantity: nextQty } : null;
+          }
+          return item;
+        })
+        .filter(Boolean)
+    );
+  };
+
+  const removeFromCart = (id) => {
+    setCart((prevCart) => prevCart.filter((item) => item.id !== id));
+  };
+
+  const cartTotal = cart.reduce((acc, item) => acc + item.price * item.quantity, 0);
+  const totalItemsCount = cart.reduce((acc, item) => acc + item.quantity, 0);
+
+  const handlePrint = (order) => {
+    setActivePrintOrder(order);
+    setTimeout(() => { window.print(); }, 300);
+  };
+
+  const handleKdsViewToggle = () => {
+    if (isStaffAuthenticated) { 
+      setCurrentView('kitchen'); 
+    } else { 
+      setIsAuthModalOpen(true); 
+    }
+  };
+
+  const handleVerifyPin = (e) => {
+    e.preventDefault();
+    if (pinInput === OWNER_PIN) {
+      setIsStaffAuthenticated(true); 
+      setIsAuthModalOpen(false); 
+      setPinInput('');
+      setCurrentView('kitchen'); 
+      setKitchenSubView('orders');
+      showToast('🔒 Unlocked KDS');
+    } else {
+      alert('Incorrect PIN!'); 
+      setPinInput('');
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans flex flex-col relative selection:bg-emerald-200">
+      
+      <style>{`
+        @media print {
+          @page { size: 80mm auto; margin: 0; }
+          html, body { margin: 0; padding: 0; }
+          body * { visibility: hidden !important; }
+          #harsha-thermal-receipt, #harsha-thermal-receipt * { visibility: visible !important; }
+          #harsha-thermal-receipt {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 80mm;
+            max-width: 80mm;
+            min-height: 100%;
+            box-sizing: border-box;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 10px;
+            color: #000;
+            background: #fff;
+            padding: 3mm 4mm;
+            font-weight: 700;
+            line-height: 1.2;
+            word-wrap: break-word;
+          }
+          #harsha-thermal-receipt * { box-sizing: border-box; }
+          #harsha-thermal-receipt table { width: 100%; border-collapse: collapse; }
+          #harsha-thermal-receipt td, #harsha-thermal-receipt th {
+            padding: 2px 0;
+            font-weight: 700;
+            vertical-align: top;
+          }
+          #harsha-thermal-receipt th { text-align: left; }
+          #harsha-thermal-receipt th:last-child,
+          #harsha-thermal-receipt td:last-child { text-align: right; }
+          #harsha-thermal-receipt thead tr,
+          #harsha-thermal-receipt tfoot tr { border-bottom: 1px dashed #000; }
+          #harsha-thermal-receipt tr { page-break-inside: avoid; }
+          #harsha-thermal-receipt .item-name { display: inline-block; max-width: 34mm; white-space: normal; word-break: break-word; }
+          #harsha-thermal-receipt .item-qty { width: 12mm; text-align: center; }
+          #harsha-thermal-receipt .item-price,
+          #harsha-thermal-receipt .item-amount { width: 16mm; text-align: right; }
+          #harsha-thermal-receipt .receipt-header { font-size: 12px; }
+          #harsha-thermal-receipt .receipt-small { font-size: 9px; }
+          #harsha-thermal-receipt .section-divider { margin: 3px 0; border-bottom: 1px dashed #000; }
+        }
+      `}</style>
+
+      {toast.show && (
+        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-xl border border-emerald-500 print:hidden">
+          <span className="font-medium text-xs tracking-wide">{toast.message}</span>
+        </div>
+      )}
+
+      <header className="sticky top-0 z-40 bg-white border-b border-slate-100 shadow-xs backdrop-blur-md bg-white/95 print:hidden">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 h-16 sm:h-20 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 sm:w-11 sm:h-11 bg-gradient-to-tr from-emerald-600 to-emerald-400 rounded-lg flex items-center justify-center text-white shadow-xs">
+              <Utensils size={18} />
+            </div>
+            <div>
+              <h1 className="text-sm sm:text-xl font-bold tracking-tight text-slate-900">
+                Harsha Restaurant <span className="text-[10px] sm:text-xs bg-emerald-100 text-emerald-800 font-semibold px-1.5 py-0.5 rounded-full">ANP</span>
+              </h1>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 sm:gap-3">
+            <button onClick={() => { setCurrentView('customer'); setIsStaffAuthenticated(false); }} className={`px-2.5 py-1.5 sm:px-4 sm:py-2 rounded-md sm:rounded-lg text-xs sm:text-sm font-semibold transition-all ${currentView === 'customer' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'text-slate-600 hover:bg-slate-50'}`}>Menu</button>
+            <button onClick={() => { setCurrentView('parcel'); setIsStaffAuthenticated(false); }} className={`px-2.5 py-1.5 sm:px-4 sm:py-2 rounded-md sm:rounded-lg text-xs sm:text-sm font-semibold transition-all ${currentView === 'parcel' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'text-slate-600 hover:bg-slate-50'}`}>Parcel</button>
+            <button onClick={handleKdsViewToggle} className={`px-2.5 py-1.5 sm:px-4 sm:py-2 rounded-md sm:rounded-lg text-xs sm:text-sm font-semibold transition-all relative flex items-center gap-1 ${currentView === 'kitchen' ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'text-slate-600 hover:bg-slate-50'}`}>
+              {isStaffAuthenticated ? <Unlock size={12} className="text-emerald-600" /> : <Lock size={12} className="text-slate-400" />} KDS
+              {orders.length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-rose-500 text-white text-[9px] font-black rounded-full flex items-center justify-center">{orders.length}</span>}
+            </button>
+            {currentView !== 'kitchen' && (
+              <button onClick={() => setIsCartOpen(true)} className="ml-1 w-9 h-9 sm:w-11 sm:h-11 bg-slate-900 text-white rounded-lg flex items-center justify-center relative shadow-md">
+                <ShoppingBag size={16} />
+                {totalItemsCount > 0 && <span className="absolute -top-1 -right-1 bg-emerald-500 text-white text-[10px] font-bold w-4 h-4 rounded-full flex items-center justify-center">{totalItemsCount}</span>}
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-grow max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 print:hidden">
+        {(currentView === 'customer' || currentView === 'parcel') && (
+          <div>
+            <div className="bg-gradient-to-r from-emerald-900 to-slate-900 rounded-2xl p-4 sm:p-10 text-white shadow-md mb-4 sm:mb-8 relative overflow-hidden">
+              <div className="relative z-10 max-w-lg">
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-500/20 text-emerald-300 rounded-md text-[10px] font-semibold mb-1.5 tracking-wider border border-emerald-500/30"><Sparkles size={10}/> Harsha Family Specials</span>
+                <h2 className="text-lg sm:text-4xl font-extrabold tracking-tight">Delicious Food, Instant Ordering</h2>
+                <p className="mt-3 text-sm text-emerald-200 max-w-2xl">{currentView === 'parcel' ? 'Parcel ordering does not require a table number. Search items and send directly to kitchen.' : 'Select a table and order quickly from the menu.'}</p>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2 mb-6">
+              <div className="flex gap-1.5 overflow-x-auto pb-3 sm:pb-0 scrollbar-hide">
+                {MENU_CATEGORIES.map((cat) => (
+                  <button key={cat} onClick={() => setActiveCategory(cat)} className={`px-4 py-2 rounded-full font-bold text-xs transition-all whitespace-nowrap uppercase ${activeCategory === cat ? 'bg-emerald-600 text-white shadow-xs' : 'bg-white text-slate-600 border border-slate-200'}`}>{cat}</button>
+                ))}
+              </div>
+              {currentView === 'parcel' && (
+                <div className="flex-1 min-w-[220px]">
+                  <label className="sr-only">Search Parcel Items</label>
+                  <input
+                    type="search"
+                    value={parcelSearch}
+                    onChange={(e) => setParcelSearch(e.target.value)}
+                    placeholder="Search parcel items..."
+                    className="w-full bg-white border border-slate-200 rounded-2xl px-4 py-3 text-sm font-semibold shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {filteredMenuItems.map((item) => {
+                const cartItem = cart.find(c => c.id === item.id);
+                const serialLabel = `#${getItemSerial(item)}`;
+                return (
+                  <div key={item.id} className="bg-white rounded-xl p-4 border border-slate-100 shadow-xs flex justify-between items-center gap-4">
+                    <div className="min-w-0 flex-grow">
+                      <span className="block text-[10px] font-bold uppercase tracking-[0.22em] text-slate-400 mb-2">Serial {serialLabel}</span>
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-bold text-base text-slate-900 uppercase truncate">{item.name}</h3>
+                        <span className="text-[9px] font-black bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded shrink-0">{item.category}</span>
+                      </div>
+                      <p className="text-slate-400 text-xs leading-tight mt-1 line-clamp-2">{item.description}</p>
+                      <span className="text-emerald-600 font-black text-sm block mt-2">₹{item.price}</span>
+                    </div>
+                    <div className="shrink-0">
+                      {cartItem ? (
+                        <div className="flex items-center bg-emerald-50 border border-emerald-200 rounded-lg p-1 gap-3">
+                          <button onClick={() => updateQuantity(item.id, -1)} className="w-8 h-8 bg-white text-emerald-600 border border-emerald-100 rounded-md flex items-center justify-center"><Minus size={14} /></button>
+                          <span className="font-black text-sm text-emerald-800 min-w-[12px] text-center font-mono">{cartItem.quantity}</span>
+                          <button onClick={() => updateQuantity(item.id, 1)} className="w-8 h-8 bg-white text-emerald-600 border border-emerald-100 rounded-md flex items-center justify-center"><Plus size={14} /></button>
+                        </div>
+                      ) : (
+                        <button onClick={() => addToCart(item)} className="bg-emerald-600 text-white text-xs font-bold px-5 py-2.5 rounded-lg flex items-center gap-1 shadow-xs hover:bg-emerald-700"><Plus size={14} /> Add</button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {currentView === 'kitchen' && isStaffAuthenticated && (
+          <div>
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-6 border-b border-slate-200 pb-4">
+              <div className="flex items-center gap-2 bg-white border border-slate-200 p-1 rounded-xl shadow-xs flex-wrap">
+                <button onClick={() => setKitchenSubView('orders')} className={`px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all ${kitchenSubView === 'orders' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50'}`}><ClipboardList size={14} /> Live Orders ({orders.length})</button>
+                <button onClick={() => setKitchenSubView('analytics')} className={`px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all ${kitchenSubView === 'analytics' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}><Download size={14} /> Sales Analytics</button>
+                <button onClick={() => setKitchenSubView('inventory')} className={`px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all ${kitchenSubView === 'inventory' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50'}`}><Layers size={14} /> Configuration Setup</button>
+              </div>
+              <button onClick={handleResetCounters} className="bg-rose-50 text-rose-700 border border-rose-200 text-xs px-3 py-1.5 rounded-lg flex items-center gap-1 font-semibold hover:bg-rose-100 transition-colors shadow-xs"><RefreshCw size={13} /> Reset Counter</button>
+            </div>
+
+            {kitchenSubView === 'orders' && (
+              <div>
+                <div className="mb-4">
+                  <h2 className="text-base sm:text-2xl font-extrabold text-slate-900 tracking-tight">Kitchen Live Monitor</h2>
+                  <div className="text-slate-500 text-xs mt-0.5 font-medium">Total Bills Completed Today &rarr; <span className="bg-emerald-100 text-emerald-800 font-bold font-mono px-2 py-0.5 rounded-md">{completedBillsCount}</span></div>
+                </div>
+                {orders.length === 0 ? <div className="bg-white rounded-xl border-2 border-dashed border-slate-200 p-16 text-center max-w-sm mx-auto my-12"><p className="text-slate-500 font-medium text-sm">Waiting for incoming tickets...</p></div> : 
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {orders.map((order) => (
+                      <div key={order.id} className="bg-white rounded-xl border border-slate-200 shadow-xs flex flex-col">
+                        <div className="bg-slate-900 text-white p-3 flex justify-between items-center">
+                          <div><h4 className="text-sm font-black">TABLE {order.tableNumber}</h4><div className="text-[10px] text-amber-400 mt-0.5 font-mono">Token: {order.tokenNo} | Bill: {order.billNo}</div></div>
+                          <span className="text-[10px] text-slate-400 font-mono">{order.time}</span>
+                        </div>
+                        <div className="p-3 flex-grow">
+                          <ul className="space-y-2">
+                            {order.items?.map((it, idx) => (<li key={idx} className="flex justify-between text-xs border-b border-slate-50 pb-1.5"><span className="font-medium text-slate-800">{it.name}</span><span className="bg-slate-100 px-1.5 py-0.5 font-bold rounded">x{it.quantity}</span></li>))}
+                          </ul>
+                        </div>
+                        <div className="p-2 bg-slate-50 border-t border-slate-100 flex gap-2">
+                          <button onClick={() => handlePrint(order)} className="w-1/2 bg-slate-800 text-white text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-1 shadow-xs hover:bg-slate-700"><Printer size={12} /> Print Bill</button>
+                          <button onClick={() => markOrderDone(order.id)} className="w-1/2 bg-emerald-600 text-white text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-1 shadow-xs hover:bg-emerald-700"><CheckCircle size={12} /> Complete</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                }
+              </div>
+            )}
+
+            {kitchenSubView === 'inventory' && (
+              <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-xs max-w-3xl mx-auto space-y-6">
+                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+                  <div>
+                    <h3 className="text-emerald-900 font-black text-sm uppercase">Cloud Database Sync</h3>
+                    <p className="text-emerald-700 text-xs mt-0.5">Force write all operational menu items to your online Firestore Database panel.</p>
+                  </div>
+                  <button onClick={handleForceMasterSeed} className="bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs px-5 py-3 rounded-lg flex items-center gap-1.5 shadow-md shrink-0 transition-all active:scale-95"><RefreshCw size={14} /> Sync to Firebase Cloud</button>
+                </div>
+
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+                  <div>
+                    <h3 className="text-blue-900 font-black text-sm uppercase">📊 Sales Analytics</h3>
+                    <p className="text-blue-700 text-xs mt-0.5">Export item sales data to Excel sheet showing quantities sold and revenue for each item.</p>
+                  </div>
+                  <button onClick={handleExportSalesReport} className="bg-blue-600 hover:bg-blue-700 text-white font-black text-xs px-5 py-3 rounded-lg flex items-center gap-1.5 shadow-md shrink-0 transition-all active:scale-95"><Download size={14} /> Export to Excel</button>
+                </div>
+
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+                  <span className="text-[10px] font-black text-slate-400 tracking-wider uppercase flex items-center gap-1"><Filter size={10}/> Filter Inventory View By Category</span>
+                  <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-hide">
+                    {MENU_CATEGORIES.map((cat) => (
+                      <button 
+                        key={cat} 
+                        onClick={() => { setActiveInventoryCategory(cat); setEditingItemId(null); }} 
+                        className={`px-3 py-1.5 rounded-lg font-bold text-[11px] transition-all whitespace-nowrap uppercase ${activeInventoryCategory === cat ? 'bg-slate-900 text-white shadow-xs' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'}`}
+                      >
+                        {cat}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="border-b border-slate-100 pb-3 flex flex-col sm:flex-row justify-between items-center gap-3">
+                  <h2 className="text-base sm:text-xl font-black text-slate-900 tracking-tight uppercase">Menu Layout Inventory ({activeInventoryCategory})</h2>
+                  <button onClick={() => setIsAddFormOpen(!isAddFormOpen)} className="bg-emerald-600 text-white text-xs font-bold px-4 py-2 rounded-lg flex items-center gap-1 shadow-xs hover:bg-emerald-700 transition-colors"><Plus size={14} /> {isAddFormOpen ? 'Close Form' : 'Add New Item'}</button>
+                </div>
+                
+                {isAddFormOpen && (
+                  <form onSubmit={handleAddItem} className="bg-slate-50 border border-slate-200 p-4 rounded-xl mb-6 space-y-3 text-xs">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <input type="text" required placeholder="Item Name *" value={newItemName} onChange={e => setNewItemName(e.target.value)} className="w-full bg-white border p-2 rounded-lg" />
+                      <input type="text" placeholder="Serial No." value={newItemSerial} onChange={e => setNewItemSerial(e.target.value)} className="w-full bg-white border p-2 rounded-lg" />
+                      <input type="number" required placeholder="Price (₹) *" value={newItemPrice} onChange={e => setNewItemPrice(e.target.value)} className="w-full bg-white border p-2 rounded-lg" />
+                      <select value={newItemCategory} onChange={e => setNewItemCategory(e.target.value)} className="w-full bg-white border p-2 rounded-lg h-9">
+                        {MENU_CATEGORIES.map(cat => (<option key={cat} value={cat}>{cat}</option>))}
+                      </select>
+                    </div>
+                    <textarea placeholder="Description" value={newItemDescription} onChange={e => setNewItemDescription(e.target.value)} className="w-full bg-white border p-2 rounded-lg h-16 resize-none" />
+                    <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg hover:bg-slate-800 transition-colors">Confirm & Save</button>
+                  </form>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {menuItems.filter(item => item.category === activeInventoryCategory).map((item) => {
+                    const isEditing = editingItemId === item.id;
+                    const serialLabel = `#${getItemSerial(item)}`;
+
+                    return (
+                      <div key={item.id} className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 flex flex-col justify-between gap-3 shadow-xs hover:bg-slate-50 transition-all">
+                        {isEditing ? (
+                          /* Expanded Edit Mode Form Fields */
+                          <div className="space-y-2 text-xs w-full">
+                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                              <div>
+                                <label className="text-[10px] font-black text-slate-400 block mb-1">EDIT SERIAL NO.</label>
+                                <input type="text" value={editSerial} onChange={e => setEditSerial(e.target.value)} className="w-full bg-white border p-2 rounded-lg font-bold uppercase" placeholder="e.g. 101" />
+                              </div>
+                              <div>
+                                <label className="text-[10px] font-black text-slate-400 block mb-1">CURRENT SERIAL</label>
+                                <div className="w-full bg-slate-100 border border-slate-200 p-2 rounded-lg text-slate-600 font-semibold">{serialLabel}</div>
+                              </div>
+                            </div>
+                            <div className="space-y-1">
+                              <span className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Serial {serialLabel}</span>
+                              <div>
+                                <label className="text-[10px] font-black text-slate-400 block mb-1">EDIT DISH NAME</label>
+                                <input type="text" value={editName} onChange={e => setEditEditName(e.target.value)} className="w-full bg-white border p-2 rounded-lg font-bold uppercase" />
+                              </div>
+                            </div>
+                            <div>
+                              <label className="text-[10px] font-black text-slate-400 block mb-1">EDIT COST (₹)</label>
+                              <input type="number" value={editPrice} onChange={e => setEditPrice(e.target.value)} className="w-full bg-white border p-2 rounded-lg font-mono text-emerald-600 font-bold" />
+                            </div>
+                            <div>
+                              <label className="text-[10px] font-black text-slate-400 block mb-1">EDIT DESCRIPTION</label>
+                              <textarea value={editDescription} onChange={e => setEditDescription(e.target.value)} className="w-full bg-white border p-2 rounded-lg h-14 resize-none leading-tight" />
+                            </div>
+                          </div>
+                        ) : (
+                          /* Standard Layout Output Row Display */
+                          <div className="min-w-0">
+                            <div className="mb-2">
+                              <span className="block text-[10px] font-bold uppercase tracking-[0.24em] text-slate-400">Serial {serialLabel}</span>
+                            </div>
+                            <p className="font-extrabold text-slate-950 text-base uppercase truncate tracking-tight">{item.name}</p>
+                            <p className="text-slate-400 text-xs leading-tight mt-1 line-clamp-2 h-8">{item.description || 'No custom details added yet.'}</p>
+                            <div className="flex items-center gap-2 mt-2">
+                              {item.serial && <span className="text-[10px] bg-slate-100 text-slate-700 font-semibold px-2 py-0.5 rounded uppercase tracking-wide">#{item.serial}</span>}
+                              <span className="text-[10px] bg-slate-200 font-bold px-2 py-0.5 rounded text-slate-600 uppercase tracking-wide">{item.category}</span>
+                              <span className="text-sm font-mono text-emerald-600 font-black">₹{item.price}</span>
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="flex items-center justify-between border-t border-slate-100 pt-2.5 mt-1 gap-2 w-full shrink-0">
+                          {isEditing ? (
+                            /* Save or Cancel Editing Command Strings */
+                            <>
+                              <button onClick={() => setEditingItemId(null)} className="bg-slate-200 text-slate-600 text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1"><X size={12}/> Cancel</button>
+                              <button onClick={() => handleUpdateItem(item.id)} className="bg-emerald-600 text-white text-xs font-black px-4 py-2 rounded-lg flex items-center gap-1 shadow-sm"><Check size={12}/> Save Changes</button>
+                            </>
+                          ) : (
+                            /* Availability, Custom Editing, and Removal Controls */
+                            <>
+                              <div className="flex items-center gap-1.5">
+                                <button onClick={() => toggleItemAvailability(item.id)} className={`px-3 py-1.5 rounded-lg font-bold text-[11px] flex items-center gap-1 shadow-xs transition-colors ${item.isAvailable ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-400 line-through'}`}>{item.isAvailable ? <Eye size={12} /> : <EyeOff size={12} />}{item.isAvailable ? 'In Stock' : 'Hidden'}</button>
+                                <button onClick={() => startEditingItem(item)} className="bg-white border text-slate-600 hover:bg-slate-100 p-2 rounded-lg transition-colors shadow-xs" title="Edit cost/details"><Edit2 size={13} /></button>
+                              </div>
+                              <button onClick={() => handleRemoveItem(item.id, item.name)} className="bg-rose-50 border border-rose-100 text-rose-600 p-2 rounded-lg hover:bg-rose-100 transition-colors shadow-xs"><Trash2 size={13} /></button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {menuItems.filter(item => item.category === activeInventoryCategory).length === 0 && (
+                    <p className="text-slate-400 text-center text-xs py-4 col-span-2">No items listed inside this category yet.</p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {kitchenSubView === 'analytics' && (
+              <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-xs max-w-4xl mx-auto">
+                <div className="flex justify-between items-center mb-6 pb-4 border-b border-slate-200">
+                  <div><h2 className="text-2xl font-black text-slate-900 uppercase">Sales Analytics</h2><p className="text-slate-500 text-sm mt-1">Completed orders and item sales</p></div>
+                  <button onClick={handleExportSalesReport} className="bg-blue-600 hover:bg-blue-700 text-white font-black text-xs px-5 py-3 rounded-lg flex items-center gap-1.5"><Download size={14} /> Download</button>
+                </div>
+                {completedOrders.length === 0 ? (
+                  <div className="bg-slate-50 rounded-xl border-2 border-dashed border-slate-200 p-12 text-center"><p className="text-slate-500 text-sm">No completed orders yet.</p></div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4"><div className="text-xs font-black uppercase text-slate-600">Orders</div><div className="text-3xl font-black text-emerald-700">{completedOrders.length}</div></div>
+                      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4"><div className="text-xs font-black uppercase text-slate-600">Items Sold</div><div className="text-3xl font-black text-blue-700">{getAnalyticsData().reduce((sum, item) => sum + item.totalQty, 0)}</div></div>
+                      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4"><div className="text-xs font-black uppercase text-slate-600">Revenue</div><div className="text-3xl font-black text-amber-700">₹{getAnalyticsData().reduce((sum, item) => sum + item.totalRevenue, 0).toFixed(2)}</div></div>
+                    </div>
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl overflow-x-auto"><table className="w-full text-sm"><thead><tr className="bg-slate-900 text-white"><th className="px-4 py-2 text-left font-black">Item</th><th className="px-4 py-2 text-left font-black text-xs">Category</th><th className="px-4 py-2 text-right font-black">Price</th><th className="px-4 py-2 text-right font-black">Qty</th><th className="px-4 py-2 text-right font-black">Revenue</th></tr></thead><tbody className="divide-y divide-slate-200">{getAnalyticsData().map((item, idx) => (<tr key={idx} className="hover:bg-slate-100"><td className="px-4 py-2 font-semibold text-slate-900">{item.itemName}</td><td className="px-4 py-2 text-xs uppercase text-slate-600">{item.category}</td><td className="px-4 py-2 text-right text-slate-700">₹{item.price.toFixed(2)}</td><td className="px-4 py-2 text-right font-black text-blue-700">{item.totalQty}</td><td className="px-4 py-2 text-right font-black text-emerald-700">₹{item.totalRevenue.toFixed(2)}</td></tr>))}</tbody></table></div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      {activePrintOrder && (
+        <div id="harsha-thermal-receipt" className="hidden print:block">
+          <div style={{ textAlign: 'center', fontWeight: 'bold', textTransform: 'uppercase', fontSize: '14px' }}>Harsha Restaurant</div>
+          <div style={{ textAlign: 'center', fontSize: '10px', lineHeight: '1.3' }}>Opp, Government Hospital,<br />Main Road , Anaparthi.<br />GST IN: 37AHIPN7374F2ZX</div>
+          <div style={{ margin: '3px 0', borderBottom: '1px dashed #000' }}></div>
+          <table style={{ width: '100%', fontSize: '11px' }}>
+            <tbody>
+              <tr><td>Date: {activePrintOrder.date}</td><td style={{ textAlign: 'right', fontWeight: 'bold' }}>TABLE: {activePrintOrder.tableNumber}</td></tr>
+              <tr><td>Time: {activePrintOrder.time}</td><td style={{ textAlign: 'right' }}>Bill No.: {activePrintOrder.billNo}</td></tr>
+              <tr style={{ fontWeight: 'bold' }}><td colSpan="2">Token No.: {activePrintOrder.tokenNo}</td></tr>
+            </tbody>
+          </table>
+          <div style={{ margin: '3px 0', borderBottom: '1px dashed #000' }}></div>
+          <table style={{ width: '100%', fontSize: '11px', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={{ width: '8%' }}>No.</th>
+                <th style={{ width: '44%' }}>Item</th>
+                <th className="item-qty">Qty.</th>
+                <th className="item-price">Price</th>
+                <th className="item-amount">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activePrintOrder.items?.map((item, index) => (
+                <tr key={index}>
+                  <td>{index + 1}</td>
+                  <td className="item-name">{item.name}</td>
+                  <td className="item-qty">{item.quantity}</td>
+                  <td className="item-price">{item.price?.toFixed(2)}</td>
+                  <td className="item-amount">{(item.price * item.quantity).toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ margin: '3px 0', borderBottom: '1px dashed #000' }}></div>
+          <table style={{ width: '100%', fontSize: '11px' }}>
+            <tbody>
+              <tr><td>Total Qty: {activePrintOrder.items?.reduce((sum, i) => sum + i.quantity, 0)}</td><td style={{ textAlign: 'right' }}>Sub Total</td><td style={{ textAlign: 'right' }}>{activePrintOrder.items?.reduce((sum, i) => sum + (i.price * i.quantity), 0).toFixed(2)}</td></tr>
+              <tr style={{ fontWeight: 'bold', fontSize: '12px' }}><td></td><td style={{ textAlign: 'right' }}>Grand Total</td><td style={{ textAlign: 'right' }}>₹{activePrintOrder.items?.reduce((sum, i) => sum + (i.price * i.quantity), 0).toFixed(2)}</td></tr>
+            </tbody>
+          </table>
+          <div style={{ margin: '5px 0 3px 0', borderBottom: '1px dashed #000' }}></div>
+          <div style={{ textAlign: 'center', fontSize: '11px', fontWeight: 'bold' }}>Thanks & Visit Again</div>
+        </div>
+      )}
+
+      {isAuthModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+          <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs" onClick={() => { setIsAuthModalOpen(false); setPinInput(''); }} />
+          <div className="bg-white rounded-xl max-w-xs w-full p-5 relative z-10 shadow-xl">
+            <h3 className="text-sm font-bold text-slate-900 text-center">Enter KDS Passcode</h3>
+            <form onSubmit={handleVerifyPin} className="mt-3 space-y-3">
+              <input autoFocus ref={pinInputRef} type="password" required maxLength={4} placeholder="••••" value={pinInput} onChange={(e) => setPinInput(e.target.value)} className="w-full text-center tracking-widest border py-2 rounded-lg font-bold bg-slate-50 text-lg focus:outline-emerald-500" />
+              <div className="flex gap-2">
+                <button type="button" onClick={() => { setIsAuthModalOpen(false); setPinInput(''); }} className="w-1/2 bg-slate-100 py-2 rounded-lg text-xs font-semibold">Cancel</button>
+                <button type="submit" className="w-1/2 bg-emerald-600 text-white py-2 rounded-lg text-xs font-bold shadow-xs hover:bg-emerald-700">Verify</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {isCartOpen && (
+        <div className="fixed inset-0 z-50 overflow-hidden">
+          <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs" onClick={() => setIsCartOpen(false)} />
+          <div className="absolute inset-y-0 right-0 max-w-full flex">
+            <div className="w-screen max-w-sm bg-white flex flex-col h-full">
+              <div className="px-4 py-4 bg-slate-900 text-white flex justify-between items-center"><h3 className="text-sm font-bold">Your Table Order</h3><button onClick={() => setIsCartOpen(false)}>✕</button></div>
+              <div className="flex-grow overflow-y-auto px-4 py-3 space-y-3">
+                {cart.length === 0 ? <p className="text-center text-xs text-slate-400 pt-10">Your cart is empty</p> : 
+                  cart.map((item) => (
+                    <div key={item.id} className="flex items-center gap-3 bg-slate-50 p-2.5 rounded-lg text-xs">
+                      <div className="flex-grow min-w-0">
+                        <h4 className="font-bold text-slate-900 truncate uppercase">{item.name}</h4>
+                        <span className="text-emerald-600 font-bold block">₹{item.price * item.quantity}</span>
+                        <div className="flex items-center gap-2 mt-1">
+                          <button onClick={() => updateQuantity(item.id, -1)} className="w-5 h-5 bg-white border rounded flex items-center justify-center">-</button>
+                          <span className="font-bold">{item.quantity}</span>
+                          <button onClick={() => updateQuantity(item.id, 1)} className="w-5 h-5 bg-white border rounded flex items-center justify-center">+</button>
+                        </div>
+                      </div>
+                      <button onClick={() => removeFromCart(item.id)} className="text-slate-400 p-1"><Trash2 size={14} /></button>
+                    </div>
+                  ))
+                }
+              </div>
+              {cart.length > 0 && (
+                <form onSubmit={handlePlaceOrder} className="border-t border-slate-100 p-4 bg-slate-50 space-y-3">
+                  {currentView !== 'parcel' ? (
+                    <input type="number" required placeholder="Your Table Number *" value={tableNumber} onChange={(e) => setTableNumber(e.target.value)} className="w-full bg-white border px-3 py-2 rounded-lg text-xs font-bold" />
+                  ) : (
+                    <div className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-xl px-3 py-3">Parcel order: no table number required.</div>
+                  )}
+                  <div className="flex justify-between font-bold text-sm"><span>Total</span><span className="text-emerald-600">₹{cartTotal}</span></div>
+                  <button type="submit" className="w-full bg-emerald-600 text-white font-bold py-2.5 rounded-lg text-xs flex items-center justify-center gap-1 shadow-md font-mono">{currentView === 'parcel' ? 'Send Parcel to Kitchen →' : 'Send Order to Kitchen →'}</button>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
